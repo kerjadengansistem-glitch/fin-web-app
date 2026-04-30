@@ -44,55 +44,132 @@
     const box3D = "border-2 border-gray-900 dark:border-gray-600 shadow-[4px_4px_0_0_#111827] dark:shadow-[4px_4px_0_0_#000000] transition-all";
     const box3DHover = "hover:shadow-[6px_6px_0_0_#111827] dark:hover:shadow-[6px_6px_0_0_#000000] hover:-translate-y-0.5 transition-all";
 
+    function AppWrapper() {
+      const [supabaseClient, setSupabaseClient] = useState(null);
+      const isSupabaseConfigured = SUPABASE_URL.startsWith('http://') || SUPABASE_URL.startsWith('https://');
+
+      useEffect(() => {
+        if (!isSupabaseConfigured) return;
+
+        // Memuat pustaka Supabase secara dinamis melalui script tag untuk menghindari error bundler
+        if (window.supabase) {
+          setSupabaseClient(window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY));
+          return;
+        }
+
+        const script = document.createElement('script');
+        script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.38.4/dist/umd/supabase.min.js';
+        script.onload = () => {
+          setSupabaseClient(window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY));
+        };
+        document.body.appendChild(script);
+      }, [isSupabaseConfigured]);
+
+      if (!isSupabaseConfigured) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-4 bg-gray-50 dark:bg-gray-900 transition-colors duration-300">
+            <div className={`bg-white dark:bg-gray-800 p-8 rounded-2xl max-w-md w-full text-center ${box3D}`}>
+              <AlertCircle size={48} className="text-red-500 mx-auto mb-4" />
+              <h1 className="text-2xl font-black text-gray-900 dark:text-white mb-2 tracking-tight">Koneksi Database</h1>
+              <p className="text-gray-500 dark:text-gray-400 font-medium mb-6">Aplikasi ini membutuhkan koneksi Supabase untuk menyimpan data.</p>
+            </div>
+          </div>
+        );
+      }
+
+      if (!supabaseClient) {
+        return (
+          <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 transition-colors duration-300">
+            <div className="text-indigo-600 dark:text-indigo-400 font-bold animate-pulse text-lg">Menghubungkan ke Supabase...</div>
+          </div>
+        );
+      }
+
+      return <MainApp supabase={supabaseClient} />;
+    }
+
     function MainApp({ supabase }) {
       const [session, setSession] = useState(null);
       const [authStatus, setAuthStatus] = useState('checking'); 
 
       useEffect(() => {
+        let isMounted = true;
+
         const handleAuthChange = async (sessionUser) => {
-          if (sessionUser) {
-            try {
-              const { data: whitelistData, error } = await supabase
-                .from('allowed_users')
-                .select('*')
-                .eq('email', sessionUser.email)
-                .single();
-              
-              if (whitelistData && !error) {
-                setSession(sessionUser);
-                setAuthStatus('authenticated');
-              } else {
-                setSession(sessionUser); 
-                setAuthStatus('unauthorized');
-              }
-            } catch (error) {
-              console.error("Gagal memverifikasi whitelist", error);
+          // 1. Jika tidak ada user yang login, tolak akses.
+          if (!sessionUser || !sessionUser.email) {
+            if (isMounted) {
+              setSession(null);
+              setAuthStatus('unauthenticated');
+            }
+            return;
+          }
+
+          try {
+            console.log("Memverifikasi email:", sessionUser.email);
+            
+            // 2. Query super ketat: Cari email yang sama persis (mengabaikan huruf besar/kecil)
+            const { data: whitelistData, error } = await supabase
+              .from('allowed_users')
+              .select('email')
+              .ilike('email', sessionUser.email); // ilike = case insensitive
+            
+            if (!isMounted) return;
+
+            if (error) {
+              console.error("Database error saat cek whitelist:", error.message);
+              setSession(sessionUser);
+              setAuthStatus('unauthorized');
+              return;
+            }
+            
+            // 3. Pengecekan Kunci: Array data HARUS lebih besar dari 0 (artinya email ditemukan di tabel)
+            if (whitelistData && whitelistData.length > 0) {
+              console.log("Email ditemukan! Mengizinkan akses...");
+              setSession(sessionUser);
+              setAuthStatus('authenticated');
+            } else {
+              console.log("Email TIDAK ditemukan di tabel allowed_users. Memblokir akses...");
+              setSession(sessionUser); 
+              setAuthStatus('unauthorized');
+            }
+          } catch (error) {
+            console.error("Gagal memverifikasi whitelist secara fatal", error);
+            if (isMounted) {
               setSession(sessionUser);
               setAuthStatus('unauthorized');
             }
-          } else {
-            setSession(null);
-            setAuthStatus('unauthenticated');
           }
         };
 
+        // Mengecek sesi saat aplikasi pertama kali dimuat
         supabase.auth.getSession().then(({ data: { session } }) => {
           handleAuthChange(session?.user);
         });
 
+        // Terus memantau jika pengguna login/logout
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
           handleAuthChange(session?.user);
         });
 
-        return () => subscription.unsubscribe();
+        return () => {
+          isMounted = false;
+          subscription.unsubscribe();
+        };
       }, [supabase]);
 
       const handleLogin = async () => {
         setAuthStatus('checking');
         try {
+          // Konfigurasi agar pengguna dipaksa memilih akun Google yang ingin dipakai
           const { error } = await supabase.auth.signInWithOAuth({
             provider: 'google',
-            options: { redirectTo: window.location.origin }
+            options: { 
+              redirectTo: window.location.origin,
+              queryParams: {
+                prompt: 'select_account' // Memaksa muncul popup pilihan akun Google
+              }
+            }
           });
           if (error) throw error;
         } catch (error) { 
@@ -132,10 +209,17 @@
             <div className="w-20 h-20 bg-red-100 dark:bg-red-900/30 rounded-2xl flex items-center justify-center mx-auto mb-6"><Lock size={40} className="text-red-600 dark:text-red-400" /></div>
             <h1 className="text-2xl font-black text-gray-900 dark:text-white mb-2">Akses Ditolak</h1>
             <p className="text-gray-600 dark:text-gray-400 mb-6 font-medium italic border-b-2 border-gray-100 dark:border-gray-700 pb-4">{session?.email}</p>
-            <div className="bg-amber-50 dark:bg-amber-900/20 p-4 rounded-xl border-2 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-400 font-bold text-sm mb-8 leading-relaxed">
-              Sistem mendeteksi bahwa email Anda belum terdaftar sebagai pengguna resmi produk ini. Silakan selesaikan pendaftaran/pembayaran Anda.
+            <div className="bg-amber-50 dark:bg-amber-900/20 p-4 rounded-xl border-2 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-400 font-bold text-sm mb-6 leading-relaxed">
+              Sistem mendeteksi bahwa email Anda belum terdaftar sebagai pengguna resmi produk ini. Silakan beli akses premium untuk mulai menggunakan aplikasi.
             </div>
-            <button onClick={handleLogout} className="w-full bg-gray-900 text-white dark:bg-gray-700 py-3 rounded-xl font-bold hover:bg-gray-800 transition-colors">Ganti Akun</button>
+            <div className="flex flex-col gap-3">
+              <a href="https://lynk.id/" target="_blank" rel="noopener noreferrer" className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold hover:bg-indigo-700 transition-colors border-2 border-indigo-900 shadow-[2px_2px_0_0_#312e81] active:shadow-none active:translate-y-[2px]">
+                Beli Akses Sekarang
+              </a>
+              <button onClick={handleLogout} className="w-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200 py-3 rounded-xl font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
+                Ganti Akun Lain
+              </button>
+            </div>
           </div>
         </div>
       );
@@ -170,6 +254,7 @@
         setCurrentView(view);
       };
 
+      // Sync dengan database utama "user_data" (Pendekatan JSONB tunggal untuk kemudahan)
       useEffect(() => {
         const loadData = async () => {
           setIsFetchingData(true);
@@ -195,6 +280,7 @@
         };
         loadData();
 
+        // Set up realtime listener if needed
         const channel = supabase.channel('user_data_changes')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'user_data', filter: `user_id=eq.${user.id}` }, (payload) => {
             const newData = payload.new;
@@ -211,8 +297,9 @@
         return () => supabase.removeChannel(channel);
       }, [supabase, user.id]);
 
+      // Auto Save ke "user_data" jika state berubah
       useEffect(() => {
-        if (isFetchingData) return; 
+        if (isFetchingData) return; // Jangan save saat pertama kali load
         
         const saveData = async () => {
           try {
@@ -1150,7 +1237,7 @@
     }
 
     const root = createRoot(document.getElementById('root'));
-    root.render(<MainApp supabase={supabase} />);
+    root.render(<AppWrapper />);
   </script>
 </body>
 </html>
