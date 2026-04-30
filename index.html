@@ -51,7 +51,6 @@
       useEffect(() => {
         if (!isSupabaseConfigured) return;
 
-        // Memuat pustaka Supabase secara dinamis melalui script tag untuk menghindari error bundler
         if (window.supabase) {
           setSupabaseClient(window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY));
           return;
@@ -96,7 +95,6 @@
         let isMounted = true;
 
         const handleAuthChange = async (sessionUser) => {
-          // 1. Jika tidak ada user yang login, tolak akses.
           if (!sessionUser || !sessionUser.email) {
             if (isMounted) {
               setSession(null);
@@ -106,35 +104,35 @@
           }
 
           try {
-            console.log("Memverifikasi email:", sessionUser.email);
+            console.log("Sistem mengecek validasi email pembeli:", sessionUser.email);
             
-            // 2. Query super ketat: Cari email yang sama persis (mengabaikan huruf besar/kecil)
+            // Query ekstra ketat: Email di database harus persis sama dengan email login
             const { data: whitelistData, error } = await supabase
               .from('allowed_users')
               .select('email')
-              .ilike('email', sessionUser.email); // ilike = case insensitive
+              .eq('email', sessionUser.email); 
             
             if (!isMounted) return;
 
             if (error) {
-              console.error("Database error saat cek whitelist:", error.message);
+              console.error("Database menolak koneksi/error:", error.message);
               setSession(sessionUser);
               setAuthStatus('unauthorized');
               return;
             }
             
-            // 3. Pengecekan Kunci: Array data HARUS lebih besar dari 0 (artinya email ditemukan di tabel)
+            // Validasi penentu: Harus ada minimal 1 data email yang cocok
             if (whitelistData && whitelistData.length > 0) {
-              console.log("Email ditemukan! Mengizinkan akses...");
+              console.log("Akses Diizinkan!");
               setSession(sessionUser);
               setAuthStatus('authenticated');
             } else {
-              console.log("Email TIDAK ditemukan di tabel allowed_users. Memblokir akses...");
+              console.log("Akses Diblokir! Email belum membeli produk.");
               setSession(sessionUser); 
               setAuthStatus('unauthorized');
             }
           } catch (error) {
-            console.error("Gagal memverifikasi whitelist secara fatal", error);
+            console.error("Sistem gagal memverifikasi.", error);
             if (isMounted) {
               setSession(sessionUser);
               setAuthStatus('unauthorized');
@@ -142,12 +140,10 @@
           }
         };
 
-        // Mengecek sesi saat aplikasi pertama kali dimuat
         supabase.auth.getSession().then(({ data: { session } }) => {
           handleAuthChange(session?.user);
         });
 
-        // Terus memantau jika pengguna login/logout
         const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
           handleAuthChange(session?.user);
         });
@@ -161,14 +157,11 @@
       const handleLogin = async () => {
         setAuthStatus('checking');
         try {
-          // Konfigurasi agar pengguna dipaksa memilih akun Google yang ingin dipakai
           const { error } = await supabase.auth.signInWithOAuth({
             provider: 'google',
             options: { 
               redirectTo: window.location.origin,
-              queryParams: {
-                prompt: 'select_account' // Memaksa muncul popup pilihan akun Google
-              }
+              queryParams: { prompt: 'select_account' } // Memaksa pengguna memilih akun Google jika punya banyak akun
             }
           });
           if (error) throw error;
@@ -198,7 +191,7 @@
               </svg>
               Masuk dengan Akun Terdaftar
             </button>
-            <p className="mt-6 text-xs text-gray-400 font-medium italic">*Akses ketat. Hanya untuk member terdaftar (Whitelist).</p>
+            <p className="mt-6 text-xs text-gray-400 font-medium italic">Proteksi Keamanan Aktif v2.0</p>
           </div>
         </div>
       );
@@ -210,10 +203,10 @@
             <h1 className="text-2xl font-black text-gray-900 dark:text-white mb-2">Akses Ditolak</h1>
             <p className="text-gray-600 dark:text-gray-400 mb-6 font-medium italic border-b-2 border-gray-100 dark:border-gray-700 pb-4">{session?.email}</p>
             <div className="bg-amber-50 dark:bg-amber-900/20 p-4 rounded-xl border-2 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-400 font-bold text-sm mb-6 leading-relaxed">
-              Sistem mendeteksi bahwa email Anda belum terdaftar sebagai pengguna resmi produk ini. Silakan beli akses premium untuk mulai menggunakan aplikasi.
+              Sistem mendeteksi bahwa email Anda belum terdaftar sebagai pengguna resmi produk ini. Silakan beli akses untuk mulai menggunakan aplikasi.
             </div>
             <div className="flex flex-col gap-3">
-              <a href="https://lynk.id/" target="_blank" rel="noopener noreferrer" className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold hover:bg-indigo-700 transition-colors border-2 border-indigo-900 shadow-[2px_2px_0_0_#312e81] active:shadow-none active:translate-y-[2px]">
+              <a href="https://lynk.id/" target="_blank" rel="noopener noreferrer" className="w-full flex items-center justify-center bg-indigo-600 text-white py-3.5 rounded-xl font-bold hover:bg-indigo-700 transition-colors border-2 border-indigo-900 shadow-[2px_2px_0_0_#312e81] active:shadow-none active:translate-y-[2px]">
                 Beli Akses Sekarang
               </a>
               <button onClick={handleLogout} className="w-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200 py-3 rounded-xl font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
@@ -254,7 +247,6 @@
         setCurrentView(view);
       };
 
-      // Sync dengan database utama "user_data" (Pendekatan JSONB tunggal untuk kemudahan)
       useEffect(() => {
         const loadData = async () => {
           setIsFetchingData(true);
@@ -280,7 +272,6 @@
         };
         loadData();
 
-        // Set up realtime listener if needed
         const channel = supabase.channel('user_data_changes')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'user_data', filter: `user_id=eq.${user.id}` }, (payload) => {
             const newData = payload.new;
@@ -297,9 +288,8 @@
         return () => supabase.removeChannel(channel);
       }, [supabase, user.id]);
 
-      // Auto Save ke "user_data" jika state berubah
       useEffect(() => {
-        if (isFetchingData) return; // Jangan save saat pertama kali load
+        if (isFetchingData) return; 
         
         const saveData = async () => {
           try {
