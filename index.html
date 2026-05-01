@@ -24,7 +24,7 @@
   <div id="root"></div>
 
   <script type="text/babel" data-type="module">
-    import React, { useState, useEffect, useMemo, useRef } from 'https://esm.sh/react@18.2.0';
+    import React, { useState, useEffect, useMemo } from 'https://esm.sh/react@18.2.0';
     import { createRoot } from 'https://esm.sh/react-dom@18.2.0/client';
     import { 
       PlusCircle, Download, Wallet, TrendingUp, TrendingDown, PiggyBank, 
@@ -90,7 +90,6 @@
     function MainApp({ supabase }) {
       const [session, setSession] = useState(null);
       const [authStatus, setAuthStatus] = useState('checking'); 
-      const isRedirectRef = useRef(window.location.hash.includes('access_token') || window.location.search.includes('code'));
 
       useEffect(() => {
         let isMounted = true;
@@ -107,6 +106,7 @@
           try {
             console.log("Sistem mengecek validasi email pembeli:", sessionUser.email);
             
+            // Query ekstra ketat: Email di database harus persis sama dengan email login
             const { data: whitelistData, error } = await supabase
               .from('allowed_users')
               .select('email')
@@ -121,24 +121,15 @@
               return;
             }
             
+            // Validasi penentu: Harus ada minimal 1 data email yang cocok
             if (whitelistData && whitelistData.length > 0) {
               console.log("Akses Diizinkan!");
               setSession(sessionUser);
               setAuthStatus('authenticated');
             } else {
               console.log("Akses Diblokir! Email belum membeli produk.");
-              if (!isRedirectRef.current) {
-                await supabase.auth.signOut();
-                if (isMounted) {
-                  setSession(null);
-                  setAuthStatus('unauthenticated');
-                }
-              } else {
-                if (isMounted) {
-                  setSession(sessionUser); 
-                  setAuthStatus('unauthorized');
-                }
-              }
+              setSession(sessionUser); 
+              setAuthStatus('unauthorized');
             }
           } catch (error) {
             console.error("Sistem gagal memverifikasi.", error);
@@ -170,7 +161,7 @@
             provider: 'google',
             options: { 
               redirectTo: window.location.origin,
-              queryParams: { prompt: 'select_account' }
+              queryParams: { prompt: 'select_account' } // Memaksa pengguna memilih akun Google jika punya banyak akun
             }
           });
           if (error) throw error;
@@ -219,7 +210,7 @@
                 Beli Akses Sekarang
               </a>
               <button onClick={handleLogout} className="w-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200 py-3 rounded-xl font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">
-                Kembali ke Halaman Login
+                Ganti Akun Lain
               </button>
             </div>
           </div>
@@ -236,11 +227,8 @@
     function Dashboard({ user, onLogout, supabase }) {
       const [darkMode, setDarkMode] = useState(() => localStorage.getItem('finance_theme') === 'dark');
       const [showBalance, setShowBalance] = useState(() => localStorage.getItem('finance_show_balance') !== 'false');
-      const [showTutorial, setShowTutorial] = useState(false);
       const [currentView, setCurrentView] = useState('dashboard');
       const [isFetchingData, setIsFetchingData] = useState(true);
-      
-      const previousSaveRef = useRef(null); // Anti-Loop System
 
       const [transactions, setTransactions] = useState([]);
       const [goals, setGoals] = useState([]);
@@ -255,13 +243,19 @@
         'Tabungan': ['Dana Darurat', 'Investasi', 'Tabungan Liburan']
       };
 
-      const navigateTo = (view) => setCurrentView(view);
+      const navigateTo = (view) => {
+        setCurrentView(view);
+      };
 
       useEffect(() => {
         const loadData = async () => {
           setIsFetchingData(true);
           try {
-            const { data, error } = await supabase.from('user_data').select('*').eq('user_id', user.id).single();
+            const { data, error } = await supabase
+              .from('user_data')
+              .select('*')
+              .eq('user_id', user.id)
+              .single();
 
             if (data && !error) {
               if (data.transactions) setTransactions(data.transactions);
@@ -269,15 +263,6 @@
               if (data.goals) setGoals(data.goals);
               if (data.plans) setPlans(data.plans);
               if (data.category_map) setCustomCategories(data.category_map);
-              
-              // Inisialisasi anti-loop agar tidak otomatis nge-save saat baru memuat
-              previousSaveRef.current = JSON.stringify({
-                transactions: data.transactions || [],
-                goals: data.goals || [],
-                plans: data.plans || [],
-                wallets: data.wallets || [],
-                category_map: data.category_map || []
-              });
             }
           } catch (error) {
             console.error("Error fetching data:", error);
@@ -303,33 +288,20 @@
         return () => supabase.removeChannel(channel);
       }, [supabase, user.id]);
 
-      // Bulletproof Auto Save
       useEffect(() => {
         if (isFetchingData) return; 
         
         const saveData = async () => {
-          const dataToSave = { transactions, goals, plans, wallets, category_map: customCategories };
-          const dataString = JSON.stringify(dataToSave);
-          
-          // Memutus rantai infinite loop
-          if (previousSaveRef.current === dataString) return;
-          previousSaveRef.current = dataString;
-
           try {
-            // Mencari ID baris terlebih dahulu agar tidak bergantung pada konfigurasi 'Unique' di Supabase
-            const { data: existing } = await supabase.from('user_data').select('id').eq('user_id', user.id).single();
-            
-            const payload = {
+            await supabase.from('user_data').upsert({ 
               user_id: user.id, 
-              ...dataToSave,
+              transactions, 
+              goals, 
+              plans, 
+              wallets, 
+              category_map: customCategories,
               updated_at: new Date().toISOString()
-            };
-
-            if (existing && existing.id) {
-              await supabase.from('user_data').update(payload).eq('id', existing.id);
-            } else {
-              await supabase.from('user_data').insert([payload]);
-            }
+            }, { onConflict: 'user_id' });
           } catch (err) {
             console.error("Gagal auto-save", err);
           }
@@ -913,7 +885,7 @@
                 </div>
                 <div className="flex-1 overflow-x-auto overflow-y-auto bg-gray-50 dark:bg-gray-900/50 p-4 sm:p-6">
                    <div className="space-y-4 min-w-[500px]">
-                     {currentMonthPlans.map(p => (
+                     {monthPlans.map(p => (
                        <div key={p.id} className={`flex justify-between items-center p-5 border-2 rounded-xl transition-all ${p.is_completed ? 'opacity-50 bg-gray-100 dark:bg-gray-800 border-gray-200 dark:border-gray-700 grayscale' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-600 shadow-sm hover:shadow-md'}`}>
                           <div className="flex items-start gap-4">
                             <div className="mt-1">{p.is_completed ? <CheckCircle2 size={24} className="text-green-500" /> : <Clock size={24} className="text-amber-500" />}</div>
@@ -933,7 +905,7 @@
                           </div>
                        </div>
                      ))}
-                     {currentMonthPlans.length === 0 && <div className="text-center py-16"><ClipboardList size={48} className="mx-auto mb-4 text-gray-300 dark:text-gray-600" /><p className="font-bold text-gray-500 dark:text-gray-400">Belum ada rencana bulan ini.</p></div>}
+                     {monthPlans.length === 0 && <div className="text-center py-16"><ClipboardList size={48} className="mx-auto mb-4 text-gray-300 dark:text-gray-600" /><p className="font-bold text-gray-500 dark:text-gray-400">Belum ada rencana bulan ini.</p></div>}
                    </div>
                 </div>
               </div>
@@ -958,13 +930,7 @@
                     <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300 px-2 py-0.5 rounded text-[10px] sm:text-xs">PRO Member</span>
                   </p>
                 </div>
-                <div className="flex gap-1 sm:gap-2 mt-3 md:mt-0">
-                  <button onClick={() => setShowTutorial(true)} className="p-2 sm:p-2.5 rounded-full bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:hover:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 transition-colors" title="Panduan Penggunaan">
-                    <HelpCircle size={20}/>
-                  </button>
-                  <button onClick={() => setShowBalance(!showBalance)} className="p-2 sm:p-2.5 rounded-full bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 transition-colors" title="Sembunyikan Saldo">
-                    {showBalance ? <Eye size={20}/> : <EyeOff size={20}/>}
-                  </button>
+                <div className="flex gap-2">
                   <button onClick={() => setDarkMode(!darkMode)} className="p-2 sm:p-2.5 rounded-full bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 transition-colors">
                     {darkMode ? <Sun size={20}/> : <Moon size={20}/>}
                   </button>
@@ -1028,7 +994,7 @@
                   <div onClick={() => setCurrentView('planner')} className={`bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-900/60 dark:to-amber-800/60 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
                     <ClipboardList className="mb-3 text-amber-600 dark:text-amber-400 group-hover:scale-110 transition-transform" size={28} />
                     <p className="text-xs sm:text-sm font-bold text-amber-800 dark:text-amber-300 mb-1">Rencana Bulanan</p>
-                    <h3 className="text-xl sm:text-2xl font-black text-amber-900 dark:text-amber-100 tracking-tight truncate">{plans.filter(p => !p.is_completed).length} Tugas Aktif</h3>
+                    <h3 className="text-xl sm:text-2xl font-black text-amber-900 dark:text-amber-100 tracking-tight truncate">{plans.filter(p => !p.isCompleted).length} Tugas Aktif</h3>
                   </div>
                 </div>
 
@@ -1249,76 +1215,6 @@
                     )}
                     <button onClick={() => { if(modalState.onConfirm) modalState.onConfirm(modalState.inputValue); closeModal(); }} className={`w-full sm:w-auto px-6 py-3 sm:py-2.5 text-white font-black rounded-xl transition-all border-2 active:shadow-none active:translate-y-[2px] text-sm sm:text-base ${modalState.type === 'confirm' ? 'bg-red-600 hover:bg-red-700 border-red-900 shadow-[2px_2px_0_0_#7f1d1d]' : 'bg-indigo-600 hover:bg-indigo-700 border-indigo-900 shadow-[2px_2px_0_0_#312e81]'}`}>
                       {modalState.type === 'alert' ? 'Mengerti' : (modalState.type === 'confirm' ? 'Ya, Eksekusi' : 'Konfirmasi')}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* --- TUTORIAL MODAL --- */}
-            {showTutorial && (
-              <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 sm:p-6 bg-black/60 backdrop-blur-sm animate-fadeIn">
-                <div className={`bg-white dark:bg-gray-800 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden ${box3D}`}>
-                  <div className="p-4 sm:p-6 border-b-2 border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900/50 shrink-0">
-                    <h2 className="text-lg sm:text-xl font-black text-gray-900 dark:text-white flex items-center gap-2">
-                      <HelpCircle className="text-indigo-500" /> Buku Panduan KeuanganKu
-                    </h2>
-                    <button onClick={() => setShowTutorial(false)} className="p-2 bg-gray-200 hover:bg-red-100 dark:bg-gray-700 dark:hover:bg-red-900/50 text-gray-600 hover:text-red-600 dark:text-gray-300 dark:hover:text-red-400 rounded-full transition-colors">
-                      <X size={20} />
-                    </button>
-                  </div>
-                  
-                  <div className="p-4 sm:p-6 overflow-y-auto space-y-6 text-gray-700 dark:text-gray-300 text-sm sm:text-base">
-                    <div className="space-y-2">
-                      <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2"><Wallet size={18} className="text-blue-500"/> 1. Saldo Dompet & Rekening</h3>
-                      <p>Menu ini berfungsi sebagai buku catatan rekening nyata Anda (seperti Dompet Tunai, BCA, GoPay, dll).</p>
-                      <ul className="list-disc pl-5 space-y-1">
-                        <li><strong>Tambah Dompet:</strong> Buat kategori dompet baru dengan warna pilihan.</li>
-                        <li><strong>Sesuaikan Saldo:</strong> Jika ada ketidakcocokan saldo asli dengan catatan di aplikasi, gunakan tombol ini untuk memperbaikinya secara manual tanpa mempengaruhi riwayat transaksi.</li>
-                      </ul>
-                    </div>
-
-                    <div className="space-y-2">
-                      <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2"><PlusCircle size={18} className="text-indigo-500"/> 2. Catat Transaksi</h3>
-                      <p>Ini adalah pusat kendali untuk mencatat arus kas Anda secara rutin.</p>
-                      <ul className="list-disc pl-5 space-y-1">
-                        <li><strong>Pilih Jenis:</strong> Tentukan apakah ini <em>Pemasukan</em>, <em>Pengeluaran Harian</em>, <em>Biaya Bulanan</em>, atau <em>Tabungan</em>.</li>
-                        <li><strong>Kategori Kustom:</strong> Jika kategori yang ada kurang cocok, pilih <strong>"Lainnya..."</strong>. Kategori baru yang diketik akan otomatis tersimpan permanen di database!</li>
-                        <li><strong>Hapus Kategori:</strong> Klik ikon tong sampah (🗑️) di dropdown untuk menghapusnya.</li>
-                      </ul>
-                    </div>
-
-                    <div className="space-y-2">
-                      <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2"><Target size={18} className="text-purple-500"/> 3. Target Tabungan</h3>
-                      <p>Gunakan menu ini untuk merencanakan impian jangka panjang (misalnya: Beli Laptop Baru, Liburan).</p>
-                      <ul className="list-disc pl-5 space-y-1">
-                        <li>Tentukan <strong>Target Nominal</strong>, <strong>Tanggal Capai</strong>, dan <strong>Urgensi</strong>.</li>
-                        <li>Klik <strong>Update Saldo</strong> untuk menyicil uang ke target tersebut. <em>(Tips: Ketik minus "-" di awal angka untuk menarik/mengurangi saldo).</em></li>
-                      </ul>
-                    </div>
-
-                    <div className="space-y-2">
-                      <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2"><ClipboardList size={18} className="text-amber-500"/> 4. Rencana Bulanan (Budgeting)</h3>
-                      <p>Berguna untuk menyusun anggaran pengeluaran rutin masa depan (bayar kos, listrik, internet).</p>
-                      <ul className="list-disc pl-5 space-y-1">
-                        <li>Data yang dicatat di sini <strong>belum memotong saldo aktual Anda</strong>. Ini murni sebatas "pengingat".</li>
-                        <li><strong>Tombol Eksekusi:</strong> Saat Anda benar-benar membayar tagihannya, klik tombol ini! Anda bisa mengedit nominalnya jika tagihan asli berbeda. Setelah dieksekusi, ia otomatis pindah ke riwayat transaksi nyata.</li>
-                      </ul>
-                    </div>
-
-                    <div className="space-y-2">
-                      <h3 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2"><Filter size={18} className="text-gray-500"/> 5. Fitur Tambahan & Privasi</h3>
-                      <ul className="list-disc pl-5 space-y-1">
-                        <li><strong>Filter Waktu:</strong> Ubah tampilan ringkasan ke mode Harian, Bulanan, atau Semua Waktu di pojok kanan atas Dashboard.</li>
-                        <li><strong>Mode Mata (Privasi):</strong> Klik ikon Mata (👁️) di header untuk menyembunyikan nominal uang Anda saat membuka aplikasi di tempat umum.</li>
-                        <li><strong>Export CSV:</strong> Masuk ke riwayat transaksi dan klik tombol Export untuk men-download data ke format Excel.</li>
-                      </ul>
-                    </div>
-                  </div>
-                  
-                  <div className="p-4 sm:p-5 border-t-2 border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 flex justify-end shrink-0">
-                    <button onClick={() => setShowTutorial(false)} className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl transition-all border-2 border-indigo-900 shadow-[2px_2px_0_0_#312e81] active:shadow-none active:translate-y-[2px]">
-                      Tutup Panduan
                     </button>
                   </div>
                 </div>
