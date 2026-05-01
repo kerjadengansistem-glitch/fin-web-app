@@ -105,8 +105,6 @@
           }
 
           try {
-            console.log("Sistem mengecek validasi email pembeli:", sessionUser.email);
-            
             const { data: whitelistData, error } = await supabase
               .from('allowed_users')
               .select('email')
@@ -122,11 +120,9 @@
             }
             
             if (whitelistData && whitelistData.length > 0) {
-              console.log("Akses Diizinkan!");
               setSession(sessionUser);
               setAuthStatus('authenticated');
             } else {
-              console.log("Akses Diblokir! Email belum membeli produk.");
               if (!isRedirectRef.current) {
                 await supabase.auth.signOut();
                 if (isMounted) {
@@ -199,7 +195,7 @@
               </svg>
               Masuk dengan Akun Terdaftar
             </button>
-            <p className="mt-6 text-xs text-gray-400 font-medium italic">Proteksi Keamanan Aktif v2.0</p>
+            <p className="mt-6 text-xs text-gray-400 font-medium italic">Proteksi Keamanan Aktif v2.1</p>
           </div>
         </div>
       );
@@ -239,7 +235,7 @@
       const [currentView, setCurrentView] = useState('dashboard');
       const [isFetchingData, setIsFetchingData] = useState(true);
       
-      const previousSaveRef = useRef(null); // Anti-Loop System
+      const previousSaveRef = useRef(null);
 
       const [transactions, setTransactions] = useState([]);
       const [goals, setGoals] = useState([]);
@@ -260,22 +256,29 @@
         const loadData = async () => {
           setIsFetchingData(true);
           try {
-            const { data, error } = await supabase.from('user_data').select('*').eq('user_id', user.id).single();
+            // Perbaikan Fatal 2: Menggunakan .limit(1) untuk menghindari error duplikat baris
+            const { data, error } = await supabase
+                .from('user_data')
+                .select('*')
+                .eq('user_id', user.id)
+                .order('updated_at', { ascending: false })
+                .limit(1);
 
-            if (data && !error) {
-              if (data.transactions) setTransactions(data.transactions);
-              if (data.wallets) setWallets(data.wallets);
-              if (data.goals) setGoals(data.goals);
-              if (data.plans) setPlans(data.plans);
-              if (data.category_map) setCustomCategories(data.category_map);
+            if (data && data.length > 0) {
+              const userData = data[0];
+              // Perbaikan Fatal 1: Array Safe Guard untuk mencegah Blank Screen di Planner dll
+              setTransactions(Array.isArray(userData.transactions) ? userData.transactions : []);
+              setWallets(Array.isArray(userData.wallets) ? userData.wallets : []);
+              setGoals(Array.isArray(userData.goals) ? userData.goals : []);
+              setPlans(Array.isArray(userData.plans) ? userData.plans : []);
+              setCustomCategories(Array.isArray(userData.category_map) ? userData.category_map : []);
               
-              // Inisialisasi anti-loop agar tidak otomatis nge-save saat baru memuat
               previousSaveRef.current = JSON.stringify({
-                transactions: data.transactions || [],
-                goals: data.goals || [],
-                plans: data.plans || [],
-                wallets: data.wallets || [],
-                category_map: data.category_map || []
+                transactions: Array.isArray(userData.transactions) ? userData.transactions : [],
+                goals: Array.isArray(userData.goals) ? userData.goals : [],
+                plans: Array.isArray(userData.plans) ? userData.plans : [],
+                wallets: Array.isArray(userData.wallets) ? userData.wallets : [],
+                category_map: Array.isArray(userData.category_map) ? userData.category_map : []
               });
             }
           } catch (error) {
@@ -285,24 +288,10 @@
           }
         };
         loadData();
-
-        const channel = supabase.channel('user_data_changes')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'user_data', filter: `user_id=eq.${user.id}` }, (payload) => {
-            const newData = payload.new;
-            if (newData) {
-              if (newData.transactions) setTransactions(newData.transactions);
-              if (newData.wallets) setWallets(newData.wallets);
-              if (newData.goals) setGoals(newData.goals);
-              if (newData.plans) setPlans(newData.plans);
-              if (newData.category_map) setCustomCategories(newData.category_map);
-            }
-          })
-          .subscribe();
-
-        return () => supabase.removeChannel(channel);
+        // Menghapus subscription realtime untuk menghindari bug bentrok save (Infinite loop memory)
       }, [supabase, user.id]);
 
-      // Bulletproof Auto Save
+      // Bulletproof Auto Save (Diperbarui menghindari gagal save jika belum Unique)
       useEffect(() => {
         if (isFetchingData) return; 
         
@@ -310,13 +299,11 @@
           const dataToSave = { transactions, goals, plans, wallets, category_map: customCategories };
           const dataString = JSON.stringify(dataToSave);
           
-          // Memutus rantai infinite loop
           if (previousSaveRef.current === dataString) return;
           previousSaveRef.current = dataString;
 
           try {
-            // Mencari ID baris terlebih dahulu agar tidak bergantung pada konfigurasi 'Unique' di Supabase
-            const { data: existing } = await supabase.from('user_data').select('id').eq('user_id', user.id).single();
+            const { data: existing } = await supabase.from('user_data').select('id').eq('user_id', user.id).limit(1);
             
             const payload = {
               user_id: user.id, 
@@ -324,8 +311,8 @@
               updated_at: new Date().toISOString()
             };
 
-            if (existing && existing.id) {
-              await supabase.from('user_data').update(payload).eq('id', existing.id);
+            if (existing && existing.length > 0) {
+              await supabase.from('user_data').update(payload).eq('id', existing[0].id);
             } else {
               await supabase.from('user_data').insert([payload]);
             }
@@ -469,7 +456,6 @@
 
       const sumOfWallets = wallets.reduce((acc, w) => acc + w.balance, 0);
 
-      // --- CRUD TRANSACTIONS ---
       const handleSubmitTransaction = async (e) => {
         e.preventDefault();
         const parsedAmount = parseInt(formData.amount.replace(/[^0-9]/g, ''), 10);
@@ -515,7 +501,6 @@
         });
       };
 
-      // --- CRUD SAVINGS ---
       const renderSavingsView = () => {
         const handleGoalSubmit = async (e) => {
           e.preventDefault();
@@ -810,7 +795,6 @@
       };
 
       const renderPlannerView = () => {
-        // Hanya memunculkan Pengeluaran di Form Rencana
         const plannerAllowedTypes = ['Biaya Bulanan', 'Pengeluaran Harian'];
 
         const handlePlanSubmit = async (e) => {
@@ -958,8 +942,8 @@
                   </p>
                 </div>
                 <div className="flex gap-1 sm:gap-2 mt-3 md:mt-0">
-                  <button onClick={() => setShowTutorial(true)} className="p-2 sm:p-2.5 rounded-full bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-900/20 dark:hover:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 transition-colors" title="Panduan Penggunaan">
-                    <HelpCircle size={20}/>
+                  <button onClick={() => setShowTutorial(true)} className="p-2 sm:p-2.5 rounded-full bg-amber-50 hover:bg-amber-100 dark:bg-amber-900/20 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 transition-colors" title="Panduan Penggunaan">
+                    <AlertCircle size={20}/>
                   </button>
                   <button onClick={() => setShowBalance(!showBalance)} className="p-2 sm:p-2.5 rounded-full bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-300 transition-colors" title="Sembunyikan Saldo">
                     {showBalance ? <Eye size={20}/> : <EyeOff size={20}/>}
@@ -1027,7 +1011,7 @@
                   <div onClick={() => setCurrentView('planner')} className={`bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-900/60 dark:to-amber-800/60 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
                     <ClipboardList className="mb-3 text-amber-600 dark:text-amber-400 group-hover:scale-110 transition-transform" size={28} />
                     <p className="text-xs sm:text-sm font-bold text-amber-800 dark:text-amber-300 mb-1">Rencana Bulanan</p>
-                    <h3 className="text-xl sm:text-2xl font-black text-amber-900 dark:text-amber-100 tracking-tight truncate">{plans.filter(p => !p.is_completed).length} Tugas Aktif</h3>
+                    <h3 className="text-xl sm:text-2xl font-black text-amber-900 dark:text-amber-100 tracking-tight truncate">{(Array.isArray(plans) ? plans : []).filter(p => !p.is_completed).length} Tugas Aktif</h3>
                   </div>
                 </div>
 
@@ -1260,7 +1244,7 @@
                 <div className={`bg-white dark:bg-gray-800 rounded-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden ${box3D}`}>
                   <div className="p-4 sm:p-6 border-b-2 border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900/50 shrink-0">
                     <h2 className="text-lg sm:text-xl font-black text-gray-900 dark:text-white flex items-center gap-2">
-                      <HelpCircle className="text-indigo-500" /> Buku Panduan KeuanganKu
+                      <AlertCircle className="text-indigo-500" /> Buku Panduan KeuanganKu
                     </h2>
                     <button onClick={() => setShowTutorial(false)} className="p-2 bg-gray-200 hover:bg-red-100 dark:bg-gray-700 dark:hover:bg-red-900/50 text-gray-600 hover:text-red-600 dark:text-gray-300 dark:hover:text-red-400 rounded-full transition-colors">
                       <X size={20} />
