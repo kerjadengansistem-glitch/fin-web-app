@@ -39,8 +39,6 @@
     const SUPABASE_URL = 'https://ncwtnqmwzrnpgsvjhnwv.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5jd3RucW13enJucGdzdmpobnd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0NjM4MzgsImV4cCI6MjA5MzAzOTgzOH0.tDBX2HOVcbkY4rw8yTIXAy5t_KvSjdFfU-HiDnW4mQg';
 
-    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
     const box3D = "border-2 border-gray-900 dark:border-gray-600 shadow-[4px_4px_0_0_#111827] dark:shadow-[4px_4px_0_0_#000000] transition-all";
     const box3DHover = "hover:shadow-[6px_6px_0_0_#111827] dark:hover:shadow-[6px_6px_0_0_#000000] hover:-translate-y-0.5 transition-all";
 
@@ -105,6 +103,8 @@
           }
 
           try {
+            console.log("Sistem mengecek validasi email pembeli:", sessionUser.email);
+            
             const { data: whitelistData, error } = await supabase
               .from('allowed_users')
               .select('email')
@@ -120,9 +120,11 @@
             }
             
             if (whitelistData && whitelistData.length > 0) {
+              console.log("Akses Diizinkan!");
               setSession(sessionUser);
               setAuthStatus('authenticated');
             } else {
+              console.log("Akses Diblokir! Email belum membeli produk.");
               if (!isRedirectRef.current) {
                 await supabase.auth.signOut();
                 if (isMounted) {
@@ -163,10 +165,7 @@
         setAuthStatus('checking');
         try {
           const { error } = await supabase.auth.signInWithOAuth({
-            provider: 'google',
-            options: { 
-              redirectTo: window.location.origin
-            }
+            provider: 'google'
           });
           if (error) throw error;
         } catch (error) { 
@@ -195,7 +194,7 @@
               </svg>
               Masuk dengan Akun Terdaftar
             </button>
-            <p className="mt-6 text-xs text-gray-400 font-medium italic">Proteksi Keamanan Aktif v2.1</p>
+            <p className="mt-6 text-xs text-gray-400 font-medium italic">Proteksi Keamanan Aktif v2.2</p>
           </div>
         </div>
       );
@@ -234,6 +233,7 @@
       const [showTutorial, setShowTutorial] = useState(false);
       const [currentView, setCurrentView] = useState('dashboard');
       const [isFetchingData, setIsFetchingData] = useState(true);
+      const [saveStatus, setSaveStatus] = useState(''); // Status animasi penyimpanan
       
       const previousSaveRef = useRef(null);
 
@@ -256,17 +256,15 @@
         const loadData = async () => {
           setIsFetchingData(true);
           try {
-            // Perbaikan Fatal 2: Menggunakan .limit(1) untuk menghindari error duplikat baris
+            // Perbaikan Query: Hapus order by updated_at agar tidak error jika kolom tidak ada
             const { data, error } = await supabase
                 .from('user_data')
                 .select('*')
                 .eq('user_id', user.id)
-                .order('updated_at', { ascending: false })
                 .limit(1);
 
             if (data && data.length > 0) {
               const userData = data[0];
-              // Perbaikan Fatal 1: Array Safe Guard untuk mencegah Blank Screen di Planner dll
               setTransactions(Array.isArray(userData.transactions) ? userData.transactions : []);
               setWallets(Array.isArray(userData.wallets) ? userData.wallets : []);
               setGoals(Array.isArray(userData.goals) ? userData.goals : []);
@@ -280,6 +278,11 @@
                 wallets: Array.isArray(userData.wallets) ? userData.wallets : [],
                 category_map: Array.isArray(userData.category_map) ? userData.category_map : []
               });
+            } else {
+              // Jika user baru, inisialisasi state awal
+              previousSaveRef.current = JSON.stringify({
+                transactions: [], goals: [], plans: [], wallets: [], category_map: []
+              });
             }
           } catch (error) {
             console.error("Error fetching data:", error);
@@ -288,10 +291,9 @@
           }
         };
         loadData();
-        // Menghapus subscription realtime untuk menghindari bug bentrok save (Infinite loop memory)
       }, [supabase, user.id]);
 
-      // Bulletproof Auto Save (Diperbarui menghindari gagal save jika belum Unique)
+      // Bulletproof Auto Save
       useEffect(() => {
         if (isFetchingData) return; 
         
@@ -302,26 +304,36 @@
           if (previousSaveRef.current === dataString) return;
           previousSaveRef.current = dataString;
 
+          setSaveStatus('saving');
           try {
             const { data: existing } = await supabase.from('user_data').select('id').eq('user_id', user.id).limit(1);
             
+            // Payload tanpa updated_at untuk mencegah error skema database
             const payload = {
               user_id: user.id, 
-              ...dataToSave,
-              updated_at: new Date().toISOString()
+              ...dataToSave
             };
 
+            let saveErr;
             if (existing && existing.length > 0) {
-              await supabase.from('user_data').update(payload).eq('id', existing[0].id);
+              const { error } = await supabase.from('user_data').update(payload).eq('id', existing[0].id);
+              saveErr = error;
             } else {
-              await supabase.from('user_data').insert([payload]);
+              const { error } = await supabase.from('user_data').insert([payload]);
+              saveErr = error;
             }
+
+            if (saveErr) throw saveErr;
+            
+            setSaveStatus('saved');
+            setTimeout(() => setSaveStatus(''), 2500);
           } catch (err) {
             console.error("Gagal auto-save", err);
+            setSaveStatus('error');
           }
         };
         
-        const timeout = setTimeout(saveData, 1500);
+        const timeout = setTimeout(saveData, 1000);
         return () => clearTimeout(timeout);
       }, [transactions, goals, plans, wallets, customCategories, user.id, supabase, isFetchingData]);
 
@@ -936,10 +948,15 @@
                   <h1 className="text-xl sm:text-2xl md:text-3xl font-black text-gray-900 dark:text-white tracking-tight flex items-center gap-2 sm:gap-3">
                     <ShieldCheck className="text-indigo-600 dark:text-indigo-400" /> Dashboard Keuangan
                   </h1>
-                  <p className="text-gray-600 dark:text-gray-400 font-bold mt-1.5 text-xs sm:text-sm flex items-center gap-2">
-                    <span className="truncate max-w-[150px] sm:max-w-none">{user?.email}</span> 
-                    <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300 px-2 py-0.5 rounded text-[10px] sm:text-xs">PRO Member</span>
-                  </p>
+                  <div className="flex items-center gap-2 mt-1.5">
+                    <p className="text-gray-600 dark:text-gray-400 font-bold text-xs sm:text-sm flex items-center gap-2">
+                      <span className="truncate max-w-[150px] sm:max-w-none">{user?.email}</span> 
+                      <span className="bg-indigo-100 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300 px-2 py-0.5 rounded text-[10px] sm:text-xs">PRO Member</span>
+                    </p>
+                    {saveStatus === 'saving' && <span className="text-[10px] sm:text-xs text-amber-500 flex items-center gap-1 font-bold animate-pulse"><Clock size={14}/> Menyimpan...</span>}
+                    {saveStatus === 'saved' && <span className="text-[10px] sm:text-xs text-green-500 flex items-center gap-1 font-bold"><CheckCircle2 size={14}/> Tersimpan</span>}
+                    {saveStatus === 'error' && <span className="text-[10px] sm:text-xs text-red-500 flex items-center gap-1 font-bold"><AlertCircle size={14}/> Gagal Simpan</span>}
+                  </div>
                 </div>
                 <div className="flex gap-1 sm:gap-2 mt-3 md:mt-0">
                   <button onClick={() => setShowTutorial(true)} className="p-2 sm:p-2.5 rounded-full bg-amber-50 hover:bg-amber-100 dark:bg-amber-900/20 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 transition-colors" title="Panduan Penggunaan">
@@ -987,25 +1004,25 @@
                   <div onClick={() => setCurrentView('wallets')} className={`bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/60 dark:to-blue-800/60 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
                     <Wallet className="mb-3 text-blue-600 dark:text-blue-400 group-hover:scale-110 transition-transform" size={28} />
                     <p className="text-xs sm:text-sm font-bold text-blue-800 dark:text-blue-300 mb-1">Saldo Dompet (All)</p>
-                    <h3 className="text-xl sm:text-2xl font-black text-blue-900 dark:text-blue-100 tracking-tight truncate">{formatRupiah(stats.saldoSaatIni)}</h3>
+                    <h3 className="text-xl sm:text-2xl font-black text-blue-900 dark:text-blue-100 tracking-tight truncate">{renderAmount(stats.saldoSaatIni)}</h3>
                   </div>
                   
                   <div onClick={() => { setHistoryType('pemasukan'); setCurrentView('history'); }} className={`bg-white dark:bg-gray-800 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
                     <TrendingUp className="mb-3 text-green-600 dark:text-green-400 group-hover:scale-110 transition-transform" size={28} />
                     <p className="text-xs sm:text-sm font-bold text-gray-500 dark:text-gray-400 mb-1">Pemasukan (Filter)</p>
-                    <h3 className="text-xl sm:text-2xl font-black text-gray-900 dark:text-white tracking-tight truncate">{formatRupiah(stats.pemasukanFilter)}</h3>
+                    <h3 className="text-xl sm:text-2xl font-black text-gray-900 dark:text-white tracking-tight truncate">{renderAmount(stats.pemasukanFilter)}</h3>
                   </div>
                   
                   <div onClick={() => { setHistoryType('pengeluaran'); setCurrentView('history'); }} className={`bg-white dark:bg-gray-800 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
                     <TrendingDown className="mb-3 text-red-600 dark:text-red-400 group-hover:scale-110 transition-transform" size={28} />
                     <p className="text-xs sm:text-sm font-bold text-gray-500 dark:text-gray-400 mb-1">Pengeluaran (Filter)</p>
-                    <h3 className="text-xl sm:text-2xl font-black text-gray-900 dark:text-white tracking-tight truncate">{formatRupiah(stats.pengeluaranFilter)}</h3>
+                    <h3 className="text-xl sm:text-2xl font-black text-gray-900 dark:text-white tracking-tight truncate">{renderAmount(stats.pengeluaranFilter)}</h3>
                   </div>
                   
                   <div onClick={() => setCurrentView('savings')} className={`bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/60 dark:to-purple-800/60 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
                     <PiggyBank className="mb-3 text-purple-600 dark:text-purple-400 group-hover:scale-110 transition-transform" size={28} />
                     <p className="text-xs sm:text-sm font-bold text-purple-800 dark:text-purple-300 mb-1">Total Tabungan (All)</p>
-                    <h3 className="text-xl sm:text-2xl font-black text-purple-900 dark:text-purple-100 tracking-tight truncate">{formatRupiah(stats.totalTabungan)}</h3>
+                    <h3 className="text-xl sm:text-2xl font-black text-purple-900 dark:text-purple-100 tracking-tight truncate">{renderAmount(stats.totalTabungan)}</h3>
                   </div>
                   
                   <div onClick={() => setCurrentView('planner')} className={`bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-900/60 dark:to-amber-800/60 p-4 sm:p-6 rounded-2xl flex flex-col justify-center cursor-pointer group ${box3D} ${box3DHover}`}>
@@ -1172,7 +1189,7 @@
                                 <td className="p-4 font-black truncate max-w-[150px]">{t.category}</td>
                                 <td className="p-4 font-medium text-gray-600 dark:text-gray-400 truncate max-w-[180px]">{t.description}</td>
                                 <td className={`p-4 text-right font-black tracking-tight text-sm sm:text-base whitespace-nowrap ${isInc ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                  {isInc ? '+' : '-'}{formatRupiah(t.amount)}
+                                  {isInc ? '+' : '-'}{renderAmount(t.amount)}
                                 </td>
                                 <td className="p-4 text-center">
                                   <button onClick={() => deleteTransactionItem(t.id)} className="text-gray-400 hover:text-white hover:bg-red-500 p-2 rounded-lg transition-colors" title="Hapus Permanen">
