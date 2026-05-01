@@ -534,6 +534,21 @@
               if (isNaN(amount)) return setTimeout(() => setModalState({ isOpen: true, type: 'alert', title: 'Error', message: 'Nominal tidak valid!' }), 300);
               if (isNegative) amount = -amount;
               
+              // VALIDASI: Cek ketersediaan Saldo Tabungan
+              if (amount > 0) {
+                const totalAllocated = goals.reduce((acc, g) => acc + g.saved, 0);
+                const unallocated = stats.totalTabungan - totalAllocated;
+                
+                if (amount > unallocated) {
+                  return setTimeout(() => setModalState({ 
+                    isOpen: true, 
+                    type: 'alert', 
+                    title: 'Saldo Tidak Cukup', 
+                    message: `Total seluruh tabungan belum mencukupi! Sisa tabungan bebas yang bisa dialokasikan hanya: Rp ${new Intl.NumberFormat('id-ID').format(Math.max(0, unallocated))}` 
+                  }), 300);
+                }
+              }
+              
               const newSaved = Math.max(0, currentSaved + amount);
               setGoals(goals.map(g => g.id === id ? { ...g, saved: newSaved } : g));
             }
