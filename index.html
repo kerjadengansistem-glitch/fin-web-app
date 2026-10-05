@@ -42,6 +42,46 @@
     const box3D = "border-2 border-gray-900 dark:border-gray-600 shadow-[4px_4px_0_0_#111827] dark:shadow-[4px_4px_0_0_#000000] transition-all";
     const box3DHover = "hover:shadow-[6px_6px_0_0_#111827] dark:hover:shadow-[6px_6px_0_0_#000000] hover:-translate-y-0.5 transition-all";
 
+    // ==========================================
+    // HELPER TANGGAL (waktu lokal perangkat, bukan UTC)
+    // toISOString() memakai UTC sehingga jam 00:00-07:00 WIB
+    // menghasilkan tanggal kemarin.
+    // ==========================================
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const getToday = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    };
+    const getThisMonth = () => getToday().slice(0, 7);
+
+    // ==========================================
+    // HELPER EXPORT CSV
+    // Pemisah ';' + BOM agar langsung rapi di Excel (locale Indonesia),
+    // Google Sheets dan LibreOffice. Sel teks yang diawali karakter rumus
+    // diberi awalan ' agar tidak dieksekusi sebagai formula.
+    // ==========================================
+    const csvTextCell = (value) => {
+      let s = String(value ?? '');
+      if (s !== '-' && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+      return '"' + s.replace(/"/g, '""') + '"';
+    };
+    const buildCSV = (rows) => {
+      const header = ['Tanggal', 'Tipe', 'Kategori', 'Keterangan', 'Nominal'].map(csvTextCell).join(';');
+      const lines = rows.map(t => [
+        csvTextCell(t.date), csvTextCell(t.type), csvTextCell(t.category), csvTextCell(t.description),
+        Number.isFinite(t.amount) ? String(t.amount) : '0'
+      ].join(';'));
+      return '﻿' + [header, ...lines].join('\r\n');
+    };
+    const downloadCSV = (rows, filename) => {
+      const blob = new Blob([buildCSV(rows)], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+
     function AppWrapper() {
       const [supabaseClient, setSupabaseClient] = useState(null);
       const isSupabaseConfigured = SUPABASE_URL.startsWith('http://') || SUPABASE_URL.startsWith('https://');
@@ -87,11 +127,22 @@
 
     function MainApp({ supabase }) {
       const [session, setSession] = useState(null);
-      const [authStatus, setAuthStatus] = useState('checking'); 
-      const isRedirectRef = useRef(window.location.hash.includes('access_token') || window.location.search.includes('code'));
+      const [authStatus, setAuthStatus] = useState('checking');
+      const [authTick, setAuthTick] = useState(0);
+      const [loginError, setLoginError] = useState('');
+      // Callback OAuth Supabase membawa access_token (hash) atau code (query) -> deteksi ketat
+      const isRedirectRef = useRef(
+        /(^|[#&])access_token=/.test(window.location.hash) || /[?&]code=/.test(window.location.search)
+      );
 
       useEffect(() => {
         let isMounted = true;
+
+        // Error koneksi sesaat TIDAK boleh menendang user yang sudah masuk
+        // atau menampilkan "Akses Ditolak" ke pembeli yang sah.
+        const markVerifyError = () => {
+          if (isMounted) setAuthStatus(prev => (prev === 'authenticated' ? prev : 'error'));
+        };
 
         const handleAuthChange = async (sessionUser) => {
           if (!sessionUser || !sessionUser.email) {
@@ -103,28 +154,35 @@
           }
 
           try {
-            console.log("Sistem mengecek validasi email pembeli:", sessionUser.email);
-            
+            // Email dicocokkan tanpa membedakan huruf besar/kecil.
+            // Karakter wildcard LIKE (\ % _) di-escape agar dicocokkan apa adanya.
+            const emailPattern = sessionUser.email.trim().replace(/[\\%_]/g, (m) => '\\' + m);
+
             const { data: whitelistData, error } = await supabase
               .from('allowed_users')
               .select('email')
-              .eq('email', sessionUser.email); 
-            
+              .ilike('email', emailPattern)
+              .limit(1);
+
             if (!isMounted) return;
 
             if (error) {
-              console.error("Database menolak koneksi/error:", error.message);
-              setSession(sessionUser);
-              setAuthStatus('unauthorized');
+              console.error("Gagal memverifikasi akses:", error.message);
+              // 403 / 42501 = ditolak oleh kebijakan database -> tidak berhak.
+              // Selain itu (jaringan, server, dll) -> minta coba lagi.
+              if (error.code === '42501' || error.status === 403) {
+                setSession(sessionUser);
+                setAuthStatus('unauthorized');
+              } else {
+                markVerifyError();
+              }
               return;
             }
-            
+
             if (whitelistData && whitelistData.length > 0) {
-              console.log("Akses Diizinkan!");
               setSession(sessionUser);
               setAuthStatus('authenticated');
             } else {
-              console.log("Akses Diblokir! Email belum membeli produk.");
               if (!isRedirectRef.current) {
                 await supabase.auth.signOut();
                 if (isMounted) {
@@ -133,25 +191,27 @@
                 }
               } else {
                 if (isMounted) {
-                  setSession(sessionUser); 
+                  setSession(sessionUser);
                   setAuthStatus('unauthorized');
                 }
               }
             }
           } catch (error) {
             console.error("Sistem gagal memverifikasi.", error);
-            if (isMounted) {
-              setSession(sessionUser);
-              setAuthStatus('unauthorized');
-            }
+            markVerifyError();
           }
         };
 
         supabase.auth.getSession().then(({ data: { session } }) => {
           handleAuthChange(session?.user);
+        }).catch((err) => {
+          console.error("Gagal membaca sesi.", err);
+          markVerifyError();
         });
 
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+          // Refresh token berkala tidak perlu mengulang pengecekan whitelist
+          if (event === 'TOKEN_REFRESHED') return;
           handleAuthChange(session?.user);
         });
 
@@ -159,17 +219,25 @@
           isMounted = false;
           subscription.unsubscribe();
         };
-      }, [supabase]);
+      }, [supabase, authTick]);
+
+      const retryAuthCheck = () => {
+        setAuthStatus('checking');
+        setAuthTick(t => t + 1);
+      };
 
       const handleLogin = async () => {
+        setLoginError('');
         setAuthStatus('checking');
         try {
           const { error } = await supabase.auth.signInWithOAuth({
             provider: 'google'
           });
           if (error) throw error;
-        } catch (error) { 
-          setAuthStatus('unauthenticated'); 
+        } catch (error) {
+          console.error("Login gagal:", error);
+          setLoginError('Gagal memulai login Google. Periksa koneksi internet lalu coba lagi.');
+          setAuthStatus('unauthenticated');
         }
       };
 
@@ -194,6 +262,7 @@
               </svg>
               Masuk dengan Akun Terdaftar
             </button>
+            {loginError && <p className="mt-4 text-sm font-bold text-red-600 dark:text-red-400">{loginError}</p>}
             <p className="mt-6 text-xs text-gray-400 font-medium italic">Proteksi Keamanan Aktif v2.2</p>
           </div>
         </div>
@@ -220,7 +289,22 @@
         </div>
       );
 
+      const VerifyErrorScreen = () => (
+        <div className="min-h-screen flex items-center justify-center p-6 bg-gray-50 dark:bg-gray-950 transition-colors duration-300">
+          <div className={`bg-white dark:bg-gray-800 p-8 rounded-3xl max-w-md w-full text-center ${box3D}`}>
+            <div className="w-20 h-20 bg-amber-100 dark:bg-amber-900/30 rounded-2xl flex items-center justify-center mx-auto mb-6"><AlertCircle size={40} className="text-amber-600 dark:text-amber-400" /></div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white mb-2">Gagal Memverifikasi Akses</h1>
+            <p className="text-gray-600 dark:text-gray-400 mb-6 font-medium">Koneksi ke server sedang bermasalah. Akun Anda tidak ditolak, silakan coba lagi.</p>
+            <div className="flex flex-col gap-3">
+              <button onClick={retryAuthCheck} className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold hover:bg-indigo-700 transition-colors border-2 border-indigo-900 shadow-[2px_2px_0_0_#312e81] active:shadow-none active:translate-y-[2px]">Coba Lagi</button>
+              <button onClick={handleLogout} className="w-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200 py-3 rounded-xl font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">Keluar</button>
+            </div>
+          </div>
+        </div>
+      );
+
       if (authStatus === 'checking') return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900"><div className="animate-spin rounded-full h-12 w-12 border-4 border-indigo-600 border-t-transparent"></div></div>;
+      if (authStatus === 'error') return <VerifyErrorScreen />;
       if (authStatus === 'unauthenticated') return <LoginScreen />;
       if (authStatus === 'unauthorized') return <UnauthorizedScreen />;
 
@@ -235,7 +319,13 @@
       const [isFetchingData, setIsFetchingData] = useState(true);
       const [saveStatus, setSaveStatus] = useState(''); // Status animasi penyimpanan
       
+      // Isi = JSON data yang TERAKHIR terbukti tersimpan di server (atau baru dimuat dari server).
       const previousSaveRef = useRef(null);
+      const savingRef = useRef(false);
+      const retryTimerRef = useRef(null);
+      const [loadError, setLoadError] = useState('');
+      const [loadTick, setLoadTick] = useState(0);
+      const [saveTick, setSaveTick] = useState(0);
 
       const [transactions, setTransactions] = useState([]);
       const [goals, setGoals] = useState([]);
@@ -253,8 +343,10 @@
       const navigateTo = (view) => setCurrentView(view);
 
       useEffect(() => {
+        let cancelled = false;
         const loadData = async () => {
           setIsFetchingData(true);
+          setLoadError('');
           try {
             // Perbaikan Query: Hapus order by updated_at agar tidak error jika kolom tidak ada
             const { data, error } = await supabase
@@ -262,6 +354,12 @@
                 .select('*')
                 .eq('user_id', user.id)
                 .limit(1);
+
+            if (cancelled) return;
+
+            // Gagal memuat BUKAN berarti user baru. Jangan lanjut dengan data kosong,
+            // karena simpan berikutnya akan menimpa data asli di server.
+            if (error) throw error;
 
             if (data && data.length > 0) {
               const userData = data[0];
@@ -286,31 +384,42 @@
             }
           } catch (error) {
             console.error("Error fetching data:", error);
+            if (!cancelled) setLoadError(error?.message || 'Tidak dapat terhubung ke server.');
           } finally {
-            setIsFetchingData(false);
+            if (!cancelled) setIsFetchingData(false);
           }
         };
         loadData();
-      }, [supabase, user.id]);
+        return () => { cancelled = true; };
+      }, [supabase, user.id, loadTick]);
 
-      // Bulletproof Auto Save
+      // Auto Save
+      // - Tidak jalan selama data belum berhasil dimuat (loadError / isFetchingData).
+      // - previousSaveRef baru diperbarui SETELAH server mengonfirmasi simpan berhasil,
+      //   sehingga simpan yang gagal otomatis dicoba lagi.
+      // - Hanya satu permintaan simpan berjalan pada satu waktu, supaya
+      //   simpan lama tidak menimpa simpan yang lebih baru.
       useEffect(() => {
-        if (isFetchingData) return; 
-        
+        if (isFetchingData || loadError) return;
+
         const saveData = async () => {
+          if (savingRef.current) return; // dijadwalkan ulang oleh finally setelah simpan berjalan selesai
+
           const dataToSave = { transactions, goals, plans, wallets, category_map: customCategories };
           const dataString = JSON.stringify(dataToSave);
-          
-          if (previousSaveRef.current === dataString) return;
-          previousSaveRef.current = dataString;
 
+          if (previousSaveRef.current === dataString) return;
+
+          savingRef.current = true;
           setSaveStatus('saving');
+          let ok = false;
           try {
-            const { data: existing } = await supabase.from('user_data').select('id').eq('user_id', user.id).limit(1);
-            
+            const { data: existing, error: selectErr } = await supabase.from('user_data').select('id').eq('user_id', user.id).limit(1);
+            if (selectErr) throw selectErr;
+
             // Payload tanpa updated_at untuk mencegah error skema database
             const payload = {
-              user_id: user.id, 
+              user_id: user.id,
               ...dataToSave
             };
 
@@ -324,18 +433,43 @@
             }
 
             if (saveErr) throw saveErr;
-            
+
+            previousSaveRef.current = dataString;
+            ok = true;
             setSaveStatus('saved');
-            setTimeout(() => setSaveStatus(''), 2500);
+            setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? '' : prev)), 2500);
           } catch (err) {
             console.error("Gagal auto-save", err);
             setSaveStatus('error');
+          } finally {
+            savingRef.current = false;
+            // Berhasil: cek ulang segera (mungkin ada perubahan saat menyimpan).
+            // Gagal: coba lagi setelah 5 detik.
+            clearTimeout(retryTimerRef.current);
+            retryTimerRef.current = setTimeout(() => setSaveTick(t => t + 1), ok ? 0 : 5000);
           }
         };
-        
+
         const timeout = setTimeout(saveData, 1000);
         return () => clearTimeout(timeout);
-      }, [transactions, goals, plans, wallets, customCategories, user.id, supabase, isFetchingData]);
+      }, [transactions, goals, plans, wallets, customCategories, user.id, supabase, isFetchingData, loadError, saveTick]);
+
+      useEffect(() => () => clearTimeout(retryTimerRef.current), []);
+
+      // Peringatkan user bila mencoba menutup tab saat masih ada perubahan yang belum tersimpan
+      const latestDataStringRef = useRef('');
+      latestDataStringRef.current = JSON.stringify({ transactions, goals, plans, wallets, category_map: customCategories });
+      useEffect(() => {
+        const handleBeforeUnload = (e) => {
+          if (isFetchingData || loadError || previousSaveRef.current === null) return;
+          if (previousSaveRef.current !== latestDataStringRef.current) {
+            e.preventDefault();
+            e.returnValue = '';
+          }
+        };
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+      }, [isFetchingData, loadError]);
 
 
       const categoryMap = useMemo(() => {
@@ -350,19 +484,19 @@
       }, [customCategories]);
 
       const [globalFilterType, setGlobalFilterType] = useState('month'); 
-      const [globalFilterValue, setGlobalFilterValue] = useState(new Date().toISOString().slice(0, 7));
+      const [globalFilterValue, setGlobalFilterValue] = useState(getThisMonth());
       const [tableFilters, setTableFilters] = useState({ date: '', category: '', desc: '', type: '' });
 
       const [historyType, setHistoryType] = useState('pemasukan');
       const [historyCatFilter, setHistoryCatFilter] = useState('');
       const [historyTimeFilterType, setHistoryTimeFilterType] = useState('all');
-      const [historyTimeFilterValue, setHistoryTimeFilterValue] = useState(new Date().toISOString().slice(0, 7));
+      const [historyTimeFilterValue, setHistoryTimeFilterValue] = useState(getThisMonth());
 
       const [isSelectMode, setIsSelectMode] = useState(false);
       const [selectedIds, setSelectedIds] = useState(new Set());
 
       const [formData, setFormData] = useState({
-        date: new Date().toISOString().split('T')[0], type: 'Pemasukan', customType: '', category: 'Gaji', customCategory: '', amount: '', description: ''
+        date: getToday(), type: 'Pemasukan', customType: '', category: 'Gaji', customCategory: '', amount: '', description: ''
       });
 
       const [catDropdownOpen, setCatDropdownOpen] = useState(false);
@@ -372,7 +506,7 @@
       const [goalForm, setGoalForm] = useState({ name: '', target: '', date: '', urgency: 'sedang' });
       
       const [planForm, setPlanForm] = useState({
-        month: new Date().toISOString().slice(0, 7), type: 'Biaya Bulanan', customType: '', category: 'Listrik & Air', customCategory: '', amount: '', description: ''
+        month: getThisMonth(), type: 'Biaya Bulanan', customType: '', category: 'Listrik & Air', customCategory: '', amount: '', description: ''
       });
 
       const [showWalletForm, setShowWalletForm] = useState(false);
@@ -501,6 +635,23 @@
             setTransactions(prev => prev.filter(t => t.id !== id));
           }
         });
+      };
+
+      const toggleSelectTransaction = (id) => {
+        setSelectedIds(prev => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      };
+
+      const exportTransactionsCSV = (rows, label) => {
+        if (!rows || rows.length === 0) {
+          setModalState({ isOpen: true, type: 'alert', title: 'Tidak Ada Data', message: 'Tidak ada transaksi untuk diekspor pada tampilan ini.' });
+          return;
+        }
+        downloadCSV(rows, `${label}-${getToday()}.csv`);
       };
 
       const deleteSelectedTransactions = () => {
@@ -763,6 +914,9 @@
                 <h3 className={`text-2xl sm:text-3xl font-black ${amountColorClass} mt-1 tracking-tighter truncate`}>{renderAmount(totalNominal)}</h3>
               </div>
               <div className="flex flex-col sm:flex-row w-full lg:w-auto gap-3">
+                 <button onClick={() => exportTransactionsCSV(filteredHistory, isIncomeView ? 'riwayat-pemasukan' : 'riwayat-pengeluaran')} className="flex flex-1 sm:flex-none items-center justify-center gap-2 bg-white dark:bg-gray-800 border-2 border-gray-900 dark:border-gray-500 rounded-lg p-2.5 sm:p-2 shadow-sm font-bold text-gray-800 dark:text-gray-200 text-sm hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors" title="Unduh tampilan ini sebagai CSV">
+                   <Download size={18} className="text-gray-500 shrink-0" /> Export CSV
+                 </button>
                  <div className="flex flex-1 sm:flex-none items-center gap-2 bg-white dark:bg-gray-800 border-2 border-gray-900 dark:border-gray-500 rounded-lg p-2.5 sm:p-2 shadow-sm">
                    <Calendar size={18} className="text-gray-500 ml-1 shrink-0" />
                    <select value={historyTimeFilterType} onChange={(e) => setHistoryTimeFilterType(e.target.value)} className="bg-transparent font-bold text-gray-800 dark:text-gray-200 text-sm outline-none cursor-pointer pr-1">
@@ -850,7 +1004,7 @@
               
               setPlans(prev => prev.map(p => p.id === plan.id ? { ...p, is_completed: true } : p));
               
-              const newTx = { id: Date.now().toString(), date: new Date().toISOString().split('T')[0], type: plan.type, category: plan.category, amount: actualAmount, description: `[Rencana] ${plan.description}` };
+              const newTx = { id: Date.now().toString(), date: getToday(), type: plan.type, category: plan.category, amount: actualAmount, description: `[Rencana] ${plan.description}` };
               setTransactions(prev => [newTx, ...prev]);
             }
           });
@@ -951,6 +1105,26 @@
           </div>
         );
       };
+
+      if (isFetchingData && previousSaveRef.current === null) {
+        return <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'dark bg-gray-900' : 'bg-gray-50'}`}><div className="animate-spin rounded-full h-12 w-12 border-4 border-indigo-600 border-t-transparent"></div></div>;
+      }
+
+      if (loadError) {
+        return (
+          <div className={`min-h-screen flex items-center justify-center p-6 ${darkMode ? 'dark bg-gray-900' : 'bg-gray-50'}`}>
+            <div className={`bg-white dark:bg-gray-800 p-8 rounded-3xl max-w-md w-full text-center ${box3D}`}>
+              <div className="w-20 h-20 bg-red-100 dark:bg-red-900/30 rounded-2xl flex items-center justify-center mx-auto mb-6"><AlertCircle size={40} className="text-red-600 dark:text-red-400" /></div>
+              <h1 className="text-2xl font-black text-gray-900 dark:text-white mb-2">Data Gagal Dimuat</h1>
+              <p className="text-gray-600 dark:text-gray-400 mb-6 font-medium">Data keuangan Anda aman di server dan tidak diubah. Penyimpanan dinonaktifkan sampai data berhasil dimuat. Periksa koneksi lalu coba lagi.</p>
+              <div className="flex flex-col gap-3">
+                <button onClick={() => setLoadTick(t => t + 1)} className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-bold hover:bg-indigo-700 transition-colors border-2 border-indigo-900 shadow-[2px_2px_0_0_#312e81] active:shadow-none active:translate-y-[2px]">Coba Lagi</button>
+                <button onClick={onLogout} className="w-full bg-gray-200 text-gray-800 dark:bg-gray-700 dark:text-gray-200 py-3 rounded-xl font-bold hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors">Keluar</button>
+              </div>
+            </div>
+          </div>
+        );
+      }
 
       return (
         <div className={`min-h-screen ${darkMode ? 'dark bg-gray-900' : 'bg-gray-50'} transition-colors duration-300 p-3 sm:p-4 md:p-8 font-sans`}>
@@ -1131,6 +1305,9 @@
                         <Clock className="text-indigo-500" /> Riwayat Transaksi Terbaru
                       </h2>
                       <div className="flex gap-2 w-full sm:w-auto">
+                        <button onClick={() => exportTransactionsCSV(filteredForTable, 'transaksi')} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-white text-gray-700 hover:bg-gray-100 dark:bg-gray-700 dark:text-gray-200 dark:hover:bg-gray-600 px-4 py-2 rounded-lg text-sm font-bold border-2 border-gray-300 dark:border-gray-600 transition-all" title="Unduh transaksi yang tampil sebagai CSV">
+                          <Download size={16} /> Export CSV
+                        </button>
                         {isSelectMode ? (
                            <button onClick={deleteSelectedTransactions} disabled={selectedIds.size === 0} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-bold border-2 border-red-900 disabled:opacity-50 transition-all shadow-[2px_2px_0_0_#7f1d1d] active:shadow-none active:translate-y-[2px]">
                              <Trash2 size={16} /> Hapus ({selectedIds.size})
