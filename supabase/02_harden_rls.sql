@@ -101,13 +101,23 @@ create policy user_data_update_own
   with check (user_id = auth.uid() and public.is_allowed_user());
 
 -- 6. Satu baris per user: mencegah duplikat akibat race select-lalu-insert.
---    Dilewati (dengan NOTICE) bila masih ada duplikat; rapikan dulu lalu jalankan ulang bagian ini.
+--    * Sudah ada unique pada user_id (constraint ATAU index)  -> tidak dilakukan apa pun.
+--    * Belum ada tetapi masih ada user_id ganda               -> dilewati dengan NOTICE;
+--      rapikan dulu (lihat 01 [E]) lalu jalankan ulang bagian ini.
 do $$
 begin
-  if exists (select 1 from public.user_data group by user_id having count(*) > 1) then
+  if exists (
+    select 1
+    from pg_index i
+    join pg_attribute a on a.attrelid = i.indrelid and a.attnum = i.indkey[0]
+    where i.indrelid = 'public.user_data'::regclass
+      and i.indisunique and i.indnatts = 1 and a.attname = 'user_id'
+  ) then
+    raise notice 'unique(user_id) pada user_data sudah ada, tidak diubah.';
+  elsif exists (select 1 from public.user_data group by user_id having count(*) > 1) then
     raise notice 'LEWATI unique index user_data(user_id): masih ada user_id ganda (lihat 01 [E]).';
   else
-    create unique index if not exists user_data_user_id_key on public.user_data (user_id);
+    create unique index user_data_user_id_key on public.user_data (user_id);
   end if;
 end $$;
 
